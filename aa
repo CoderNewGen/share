@@ -258,3 +258,257 @@ const Accessibility: React.FC = () => {
 };
 
 export default React.memo(Accessibility);
+
+// usePcore.ts
+import { useEffect, useState } from 'react';
+
+const usePCore = ({ onSessionUpdate }: { onSessionUpdate: () => void }) => {
+  const [pCoreReady, setPCoreReady] = useState<boolean>(false);
+
+  useEffect(() => {
+    document.addEventListener('SdkConstellationReady', () => {
+      PCore.onPCoreReady(() => {
+        if (!pCoreReady) {
+          setPCoreReady(true);
+
+          // Subscribing to session updates and providing a callback to the parent component
+          PCore.getStore().subscribe(() => {
+            if (onSessionUpdate) {
+              onSessionUpdate(); // Pcore getting reeady something like that// Todo tbd with Petar
+            }
+          });
+
+          PCore.getPubSubUtils().subscribe(
+            PCore.getConstants().PUB_SUB_EVENTS.CONTAINER_EVENTS.CLOSE_CONTAINER_ITEM,
+            () => {
+              setPCoreReady(false); // or whatever logic you need when the container closes
+            },
+            'showStartPageOnCloseContainerItem'
+          );
+        }
+      });
+    });
+
+    return () => {
+      PCore.getPubSubUtils().unsubscribe(
+        PCore.getConstants().PUB_SUB_EVENTS.CONTAINER_EVENTS.CLOSE_CONTAINER_ITEM,
+        'showStartPageOnCloseContainerItem'
+      );
+    };
+  }, [pCoreReady, onSessionUpdate]);
+
+  return {
+    pCoreReady
+  };
+};
+
+export default usePCore;
+
+// useSummaryData.tsx
+import { useCallback } from 'react';
+import { getSdkConfig } from '@pega/auth/lib/sdk-auth-manager';
+
+const useSummaryData = () => {
+  const getSummaryData = useCallback(async (caseType: string, setSummaryPageContent: (data: any) => void) => {
+    const config = await getSdkConfig();
+    const apiUrl = `${config.serverConfig.infinityRestServerUrl}/api/application/v2/cases/${caseType}?pageName=SubmissionSummary`;
+
+    try {
+      const response = await PCore.getRestClient().invokeCustomRestApi(apiUrl, {
+        method: 'GET',
+        body: '',
+        headers: '',
+        withoutDefaultHeaders: false
+      });
+      const summaryData: Array<any> = response.data.data.caseInfo.content.ScreenContent.LocalisedContent;
+      const currentLang = sessionStorage.getItem('rsdk_locale')?.slice(0, 2).toUpperCase() || 'EN';
+
+      setSummaryPageContent(summaryData.find(data => data.Language === currentLang));
+
+      PCore.getPubSubUtils().subscribe(
+        'languageToggleTriggered',
+        ({ language }) => {
+          setSummaryPageContent(
+            summaryData.find(data => data.Language === language.toUpperCase())
+          );
+        },
+        'summarypageLanguageChange'
+      );
+    } catch (error) {
+      console.error('Error fetching summary data:', error);
+    }
+  }, []);
+
+  return {
+    getSummaryData
+  };
+};
+
+export default useSummaryData;
+
+
+// Cessation.tsx
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import usePCore from '../../hooks/usePCore';
+import useSummaryData from '../../hooks/useSummaryData';
+import AppFooter from '../../components/AppComponents/AppFooter';
+import AppHeader from '../../components/AppComponents/AppHeader';
+import TimeoutPopup from '../../components/AppComponents/TimeoutPopup';
+import ShutterServicePage from '../../components/AppComponents/ShutterServicePage';
+import LogoutPopup from '../../components/AppComponents/LogoutPopup';
+import SummaryPage from '../../components/AppComponents/SummaryPage';
+import { staySignedIn, triggerLogout } from '../../components/helpers/utils';
+import Landing from '../../components/AppComponents/Landing';
+
+const Cessation: React.FC = () => {
+  const { t } = useTranslation();
+  const summaryPageRef = useRef<HTMLDivElement>(null);
+
+  const IN_PROGRESS_CASE_COUNT_ENDPOINT = 'D_RegistrantWorkAssignmentSACases';  // Dynamic param
+  const CASE_TYPE = 'HMRC-SA-Work-Cessation';  // Dynamic param
+
+  const [showTimeoutModal, setShowTimeoutModal] = useState<boolean>(false);
+  const [showSignoutModal, setShowSignoutModal] = useState(false);
+  const [showLandingPage, setShowLandingPage] = useState<boolean>(true);
+  const [pCoreReady, setPCoreReady] = useState(false);
+  const [currentDisplay, setCurrentDisplay] = useState<'pegapage' | 'resolutionpage' | 'servicenotavailable' | 'shutterpage' | 'loading' | 'landingpage'>('pegapage');
+  const [summaryPageContent, setSummaryPageContent] = useState<any>({ content: null, title: null, banner: null });
+  const [showPortalBanner, setShowPortalBanner] = useState(false);
+  const [isLogout, setIsLogout] = useState(false);
+  const [pConnect, setPconnect] = useState(null);
+
+  const handleSessionUpdate = useCallback(() => {
+    staySignedIn(
+      setShowTimeoutModal,
+      IN_PROGRESS_CASE_COUNT_ENDPOINT,
+      null,
+      false,
+      true,
+      false,
+      { CaseType: CASE_TYPE },
+      () => {}
+    );
+  }, [IN_PROGRESS_CASE_COUNT_ENDPOINT, CASE_TYPE]);
+
+  const { pCoreReady: isPCoreReady } = usePCore({
+    onSessionUpdate: handleSessionUpdate
+  });
+
+  const { getSummaryData } = useSummaryData();
+
+  useEffect(() => {
+    if (pCoreReady) {
+      getSummaryData(CASE_TYPE, setSummaryPageContent);
+    }
+  }, [pCoreReady, getSummaryData, CASE_TYPE]);
+
+  const handleStaySignIn = e => {
+    e.preventDefault();
+    setShowSignoutModal(false);
+    staySignedIn(
+      setShowTimeoutModal,
+      IN_PROGRESS_CASE_COUNT_ENDPOINT,
+      null,
+      false,
+      true,
+      currentDisplay === 'resolutionpage',
+      { CaseType: CASE_TYPE },
+      setIsLogout
+    );
+  };
+
+  const handleCaseContinue = () => {
+    setShowLandingPage(false);
+  };
+
+  const handleSignout = e => {
+    e.preventDefault();
+    if (currentDisplay === 'pegapage') {
+      setShowSignoutModal(true);
+    } else {
+      triggerLogout(setIsLogout);
+    }
+  };
+
+  useEffect(() => {
+    if (isPCoreReady) {
+      setPCoreReady(true);
+    }
+  }, [isPCoreReady]);
+
+  return (
+    <div>
+      {currentDisplay === 'servicenotavailable' ? (
+        <>
+          <AppHeader
+            appname={t('LEAVE_SELF_ASSESSMENT')}
+            handleSignout={handleSignout}
+          />
+          <div className="govuk-width-container">
+            <div>Service Not Available</div>
+          </div>
+          <AppFooter />
+        </>
+      ) : (
+        <>
+          <TimeoutPopup
+            show={showTimeoutModal}
+            staySignedinHandler={handleStaySignIn}
+            signoutHandler={() => triggerLogout(setIsLogout)}
+          />
+          <AppHeader
+            handleSignout={handleSignout}
+            appname={t('LEAVE_SELF_ASSESSMENT')}
+          />
+          <div className="govuk-width-container">
+            {currentDisplay === 'shutterpage' ? (
+              <ShutterServicePage />
+            ) : (
+              <>
+                <div id="pega-part-of-page">
+                  <div
+                    id="pega-root"
+                    className={`pega-cessation ${isLogout ? 'visibility-hidden' : ''}`}
+                  ></div>
+                </div>
+                {currentDisplay === 'landingpage' && (
+                  <Landing
+                    showPortalBanner={showPortalBanner}
+                    isLogout={isLogout}
+                    pConn={pConnect}
+                    inProgressCaseCountEndPoint={IN_PROGRESS_CASE_COUNT_ENDPOINT}
+                    creatCaseEndpoint={'HMRC-SA-Work-Cessation'}
+                    buttonContent={t('CONTINUE_YOUR_REQUEST')}
+                    title={t('YOUR_REQUEST')}
+                    handleCaseContinue={handleCaseContinue}
+                  />
+                )}
+                {currentDisplay === 'resolutionpage' && (
+                  <SummaryPage
+                    summaryContent={summaryPageContent?.Content}
+                    summaryTitle={summaryPageContent?.Title}
+                    summaryBanner={summaryPageContent?.Banner}
+                    backlinkProps={{}}
+                    ref={summaryPageRef}
+                  />
+                )}
+              </>
+            )}
+          </div>
+
+          <LogoutPopup
+            show={showSignoutModal && !showTimeoutModal}
+            hideModal={() => setShowSignoutModal(false)}
+            handleSignoutModal={() => triggerLogout(setIsLogout)}
+            handleStaySignIn={handleStaySignIn}
+          />
+          <AppFooter />
+        </>
+      )}
+    </div>
+  );
+};
+
+export default Cessation;
+
