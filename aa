@@ -512,3 +512,305 @@ const Cessation: React.FC = () => {
 
 export default Cessation;
 
+// Correct one
+
+// useSummaryPageContent 
+import { useEffect, useState } from 'react';
+
+interface SummaryContent {
+  Content: string | null;
+  Title: string | null;
+  Banner: string | null;
+}
+
+export const useSummaryPageContent = (caseId: string, showResolutionPage: boolean) => {
+  const [summaryPageContent, setSummaryPageContent] = useState<SummaryContent>({
+    Content: null,
+    Title: null,
+    Banner: null,
+  });
+
+  useEffect(() => {
+    if (showResolutionPage) {
+      getSdkConfig().then(config => {
+        PCore.getRestClient()
+          .invokeCustomRestApi(
+            `${config.serverConfig.infinityRestServerUrl}/api/application/v2/cases/${caseId}?pageName=SubmissionSummary`,
+            { method: 'GET' }
+          )
+          .then(response => {
+            const summaryData: Array<any> = response.data.data.caseInfo.content.ScreenContent.LocalisedContent;
+            const currentLang = sessionStorage.getItem('rsdk_locale')?.slice(0, 2).toUpperCase() || 'EN';
+            setSummaryPageContent(summaryData.find(data => data.Language === currentLang));
+
+            PCore.getPubSubUtils().subscribe(
+              'languageToggleTriggered',
+              ({ language }) => {
+                setSummaryPageContent(summaryData.find(data => data.Language === language.toUpperCase()));
+              },
+              'summarypageLanguageChange'
+            );
+          })
+          .catch(() => false);
+      });
+    }
+  }, [showResolutionPage, caseId]);
+
+  return summaryPageContent;
+};
+
+// usePCoreReady 
+import { useEffect, useState } from 'react';
+
+export const usePCoreReady = (setShowPega: (show: boolean) => void) => {
+  const [pCoreReady, setPCoreReady] = useState(false);
+
+  useEffect(() => {
+    document.addEventListener('SdkConstellationReady', () => {
+      PCore.onPCoreReady(() => {
+        if (!pCoreReady) {
+          setPCoreReady(true);
+          PCore.getPubSubUtils().subscribe(
+            PCore.getConstants().PUB_SUB_EVENTS.CONTAINER_EVENTS.CLOSE_CONTAINER_ITEM,
+            () => setShowPega(false),
+            'showStartPageOnCloseContainerItem'
+          );
+        }
+      });
+      settingTimer();
+    });
+
+    return () => {
+      PCore.getPubSubUtils().unsubscribe(
+        PCore.getConstants().PUB_SUB_EVENTS.CONTAINER_EVENTS.CLOSE_CONTAINER_ITEM,
+        'showStartPageOnCloseContainerItem'
+      );
+    };
+  }, [pCoreReady]);
+
+  return pCoreReady;
+};
+
+
+// Cessation.tsx
+import React, { FunctionComponent, useState, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import AppFooter from '../../components/AppComponents/AppFooter';
+import AppHeader from '../../components/AppComponents/AppHeader';
+import TimeoutPopup from '../../components/AppComponents/TimeoutPopup';
+import LogoutPopup from '../../components/AppComponents/LogoutPopup';
+import SummaryPage from '../../components/AppComponents/SummaryPage';
+import ShutterServicePage from '../../components/AppComponents/ShutterServicePage';
+import ApiServiceNotAvailable from '../../components/AppComponents/ApiErrorServiceNotAvailable';
+import Landing from '../../components/AppComponents/Landing';
+import AppContext from '../../reuseables/AppContext';
+import { useStartMashup } from '../../reuseables/PegaSetup';
+import useHMRCExternalLinks from '../../components/helpers/hooks/HMRCExternalLinks';
+import { usePCoreReady } from './hooks/usePCoreReady';
+import { useSummaryPageContent } from './hooks/useSummaryPageContent';
+import { useSessionManagement } from './hooks/useSessionManagement'; // Custom hook for timeout and signout management
+
+const Cessation: FunctionComponent = () => {
+  const { t } = useTranslation();
+  const serviceParam = 'claim-child-benefit';
+  const caseListApiParams = { CaseType: 'HMRC-SA-Work-Cessation' };
+  const inProgressCaseCountEndPoint = 'D_RegistrantWorkAssignmentSACases';
+
+  const [currentDisplay, setCurrentDisplay] = useState<'pegapage' | 'resolutionpage' | 'servicenotavailable' | 'shutterpage' | 'loading' | 'landingpage'>('pegapage');
+  const [showLandingPage, setShowLandingPage] = useState(true);
+  const { hmrcURL } = useHMRCExternalLinks();
+
+  const {
+    showPega,
+    setShowPega,
+    showResolutionPage,
+    caseId,
+    shutterServicePage,
+    serviceNotAvailable,
+    assignmentCancelled,
+    setAssignmentCancelled,
+    containerClosed
+  } = useStartMashup({
+    appBacklinkProps: {},
+    serviceParam,
+    serviceName: 'LEAVE_SELF_ASSESSMENT',
+    appNameHeader: 'LEAVE_SELF_ASSESSMENT'
+  });
+
+  const pCoreReady = usePCoreReady(setShowPega);
+  const summaryPageContent = useSummaryPageContent(caseId, showResolutionPage);
+  const { showTimeoutModal, showSignoutModal, handleSignout, handleStaySignIn } = useSessionManagement(
+    inProgressCaseCountEndPoint,
+    caseListApiParams,
+    currentDisplay === 'resolutionpage'
+  );
+
+  const summaryPageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (assignmentCancelled) {
+      returnedToPortal(true);
+    }
+  }, [assignmentCancelled]);
+
+  const handleCaseContinue = () => {
+    setShowLandingPage(false);
+  };
+
+  const returnedToPortal = (showBanner = false) => {
+    closeContainer();
+    setShowPega(false);
+    setCurrentDisplay('landingpage');
+    setAssignmentCancelled(false);
+  };
+
+  const closeContainer = () => {
+    const containerItemName = PCore.getContainerUtils().getActiveContainerItemName('app/primary');
+    if (containerItemName) {
+      PCore.getContainerUtils().closeContainerItem(PCore.getContainerUtils().getActiveContainerItemContext('app/primary'), { skipDirtyCheck: true });
+    }
+  };
+
+  return (
+    <AppContext.Provider value={{ caseId, containerClosed, serviceParam }}>
+      <div>
+        <AppHeader
+          appname={t('LEAVE_SELF_ASSESSMENT')}
+          hasLanguageToggle={false}
+          handleSignout={() => handleSignout(currentDisplay)}
+          betafeedbackurl={`${hmrcURL}contact/beta-feedback?service=claim-child-benefit-frontend&backUrl=/fill-online/claim-child-benefit/recently-claimed-child-benefit`}
+        />
+        {showTimeoutModal && <TimeoutPopup staySignedinHandler={handleStaySignIn} />}
+        {renderDisplayComponent({
+          currentDisplay,
+          pCoreReady,
+          summaryPageContent,
+          caseId,
+          showLandingPage,
+          handleCaseContinue,
+          summaryPageRef,
+          showPortalBanner: false,
+        })}
+        <AppFooter />
+        <LogoutPopup
+          show={showSignoutModal}
+          signoutHandler={() => handleSignout(currentDisplay)}
+          staySignedinHandler={handleStaySignIn}
+        />
+      </div>
+    </AppContext.Provider>
+  );
+};
+
+export default Cessation;
+
+// HeaderWithBetaFeedback.tsx
+const HeaderWithBetaFeedback = ({
+  showLanguageToggleState,
+  handleSignout,
+  hmrcURL,
+}) => (
+  <AppHeader
+    appname={t('LEAVE_SELF_ASSESSMENT')}
+    hasLanguageToggle={showLanguageToggleState}
+    handleSignout={handleSignout}
+    betafeedbackurl={`${hmrcURL}contact/beta-feedback?service=claim-child-benefit-frontend&backUrl=/fill-online/claim-child-benefit/recently-claimed-child-benefit`}
+  />
+);
+
+// renderDisplayComponent
+const renderDisplayComponent = ({
+  currentDisplay,
+  pCoreReady,
+  summaryPageContent,
+  caseId,
+  showLandingPage,
+  handleCaseContinue,
+  summaryPageRef,
+  showPortalBanner,
+}) => {
+  const components = {
+    servicenotavailable: (
+      <ApiServiceNotAvailable />
+    ),
+    shutterpage: (
+      <ShutterServicePage />
+    ),
+    pegapage: (
+      pCoreReady && (
+        <PegaContainer
+          pConnect={PCore}
+          showPortalBanner={showPortalBanner}
+          setShowPortalBanner={() => {}}
+          continueHandler={handleCaseContinue}
+        />
+      )
+    ),
+    resolutionpage: (
+      <div ref={summaryPageRef} id="pegasus-summary-page">
+        <SummaryPage
+          caseId={caseId}
+          headerTitle={summaryPageContent.Title}
+          content={summaryPageContent.Content}
+          banner={summaryPageContent.Banner}
+          caseName={caseId}
+        />
+      </div>
+    ),
+    landingpage: (
+      <Landing continueHandler={handleCaseContinue} />
+    ),
+    loading: <div>Loading...</div>
+  };
+
+  return components[currentDisplay];
+};
+
+// useSessionManagement
+import { useState, useEffect } from 'react';
+import { triggerLogout, staySignedIn } from '../../components/helpers/utils';
+import { initTimeout } from '../../components/AppComponents/TimeoutPopup/timeOutUtils';
+
+const useSessionManagement = (inProgressCaseCountEndPoint, caseListApiParams, isResolutionPage) => {
+  const [showTimeoutModal, setShowTimeoutModal] = useState(false);
+  const [showSignoutModal, setShowSignoutModal] = useState(false);
+  const [isLogout, setIsLogout] = useState(false);
+
+  useEffect(() => {
+    initTimeout(setShowTimeoutModal, false, true, false);
+  }, []);
+
+  const handleSignout = (currentDisplay: string) => {
+    if (currentDisplay === 'pegapage') {
+      setShowSignoutModal(true);
+    } else {
+      triggerLogout(setIsLogout);
+    }
+  };
+
+  const handleStaySignIn = () => {
+    setShowSignoutModal(false);
+    staySignedIn(
+      setShowTimeoutModal,
+      inProgressCaseCountEndPoint,
+      null,
+      false,
+      true,
+      isResolutionPage,
+      caseListApiParams,
+      setIsLogout
+    );
+  };
+
+  return {
+    showTimeoutModal,
+    showSignoutModal,
+    handleSignout,
+    handleStaySignIn,
+    isLogout,
+  };
+};
+
+export default useSessionManagement;
+
+
